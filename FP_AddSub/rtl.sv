@@ -1,367 +1,147 @@
 
 module fp_addsub (
-    input  logic        clk,
-    input  logic        reset,
-    input  logic        in_valid,
-    input  logic        sub,
-    input  logic [31:0] a,
-    input  logic [31:0] b,
-    output logic        out_valid,
-    output logic [31:0] result
+  input  logic        clk,
+  input  logic        reset,       // active high, synchronous
+  input  logic        in_valid,
+  input  logic        sub,         // 0: a + b, 1: a - b
+  input  logic [31:0] a,
+  input  logic [31:0] b,
+  output logic        out_valid,
+  output logic [31:0] result
 );
 
-    // Right shift with sticky-bit preservation
-    function automatic [26:0] shift_right_jam (
-        input logic [26:0] value,
-        input integer shift
-    );
-        logic [26:0] temp;
-        logic sticky;
-        integer i;
-        begin
-            temp = 27'b0;
-            sticky = 1'b0;
-
-            if (shift <= 0) begin
-                temp = value;
-            end
-            else if (shift >= 27) begin
-                temp[0] = |value;
-            end
-            else begin
-                temp = value >> shift;
-
-                for (i = 0; i < 27; i = i + 1) begin
-                    if (i < shift)
-                        sticky = sticky | value[i];
-                end
-
-                temp[0] = temp[0] | sticky;
-            end
-
-            shift_right_jam = temp;
-        end
-    endfunction
-
-
-    // Floating-point addition / subtraction
-    function automatic [31:0] fp_calculate (
-        input logic [31:0] x,
-        input logic [31:0] y,
-        input logic do_sub
-    );
-
-        logic sign_a, sign_b, sign_big, sign_result;
-
-        logic [7:0] exp_a, exp_b;
-
-        logic [22:0] frac_a, frac_b;
-
-        logic [23:0] mant_a, mant_b;
-        logic [23:0] mant_big, mant_small;
-
-        logic [26:0] ext_big, ext_small, ext_result;
-
-        logic [27:0] sum;
-
-        logic [24:0] round_temp;
-        logic [23:0] mant_rounded;
-
-        logic guard_bit, round_bit, sticky_bit;
-
-        integer ea, eb, exp_big, exp_small;
-        integer difference;
-        integer i;
-
-        logic [31:0] answer;
-
-        begin
-
-            sign_a = x[31];
-            sign_b = y[31] ^ do_sub;
-
-            exp_a = x[30:23];
-            exp_b = y[30:23];
-
-            frac_a = x[22:0];
-            frac_b = y[22:0];
-
-            answer = 32'b0;
-
-            // --------------------------------
-            // NaN handling
-            // --------------------------------
-
-            if ((exp_a == 8'hFF && frac_a != 0) ||
-                (exp_b == 8'hFF && frac_b != 0)) begin
-
-                answer = 32'h7FC00000;
-
-            end
-
-            // --------------------------------
-            // Infinity handling
-            // --------------------------------
-
-            else if ((exp_a == 8'hFF) &&
-                     (exp_b == 8'hFF) &&
-                     (sign_a != sign_b)) begin
-
-                answer = 32'h7FC00000;
-
-            end
-
-            else if (exp_a == 8'hFF) begin
-
-                answer = {sign_a, 8'hFF, 23'b0};
-
-            end
-
-            else if (exp_b == 8'hFF) begin
-
-                answer = {sign_b, 8'hFF, 23'b0};
-
-            end
-
-            else begin
-
-                // --------------------------------
-                // Exponent preparation
-                // --------------------------------
-
-                ea = (exp_a == 0) ? 1 : exp_a;
-                eb = (exp_b == 0) ? 1 : exp_b;
-
-                // Hidden bit is zero for subnormal values
-                mant_a = { (exp_a != 0), frac_a };
-                mant_b = { (exp_b != 0), frac_b };
-
-                // --------------------------------
-                // Select larger operand
-                // --------------------------------
-
-                if ((ea > eb) ||
-                    ((ea == eb) && (mant_a >= mant_b))) begin
-
-                    mant_big = mant_a;
-                    mant_small = mant_b;
-
-                    exp_big = ea;
-                    exp_small = eb;
-
-                    sign_big = sign_a;
-
-                end
-                else begin
-
-                    mant_big = mant_b;
-                    mant_small = mant_a;
-
-                    exp_big = eb;
-                    exp_small = ea;
-
-                    sign_big = sign_b;
-
-                end
-
-                // --------------------------------
-                // Extend mantissas with GRS bits
-                // --------------------------------
-
-                ext_big = {mant_big, 3'b000};
-                ext_small = {mant_small, 3'b000};
-
-                // --------------------------------
-                // Align exponents
-                // --------------------------------
-
-                difference = exp_big - exp_small;
-
-                ext_small = shift_right_jam(
-                    ext_small, difference
-                );
-
-                // --------------------------------
-                // Addition or subtraction
-                // --------------------------------
-
-                if (sign_a == sign_b) begin
-
-                    sum = {1'b0, ext_big} +
-                          {1'b0, ext_small};
-
-                    sign_result = sign_big;
-
-                end
-                else begin
-
-                    sum = {1'b0, ext_big} -
-                          {1'b0, ext_small};
-
-                    sign_result = sign_big;
-
-                end
-
-                exp_big = exp_big;
-
-                // --------------------------------
-                // Handle exact zero
-                // --------------------------------
-
-                if (sum == 0) begin
-
-                    if ((x[30:0] == 0) &&
-                        (y[30:0] == 0) &&
-                        sign_a && sign_b)
-
-                        answer = 32'h80000000;
-
-                    else
-                        answer = 32'h00000000;
-
-                end
-                else begin
-
-                    // --------------------------------
-                    // Normalize
-                    // --------------------------------
-
-                    if (sum[27]) begin
-
-                        ext_result = sum[27:1];
-                        ext_result[0] =
-                            ext_result[0] | sum[0];
-
-                        exp_big = exp_big + 1;
-
-                    end
-                    else begin
-
-                        ext_result = sum[26:0];
-
-                        for (i = 0; i < 26; i = i + 1) begin
-
-                            if ((!ext_result[26]) &&
-                                (exp_big > 1)) begin
-
-                                ext_result = ext_result << 1;
-                                exp_big = exp_big - 1;
-
-                            end
-
-                        end
-
-                    end
-
-                    // --------------------------------
-                    // Extract GRS bits
-                    // --------------------------------
-
-                    guard_bit  = ext_result[2];
-                    round_bit  = ext_result[1];
-                    sticky_bit = ext_result[0];
-
-                    // --------------------------------
-                    // Round to nearest, ties to even
-                    // --------------------------------
-
-                    round_temp = {1'b0, ext_result[26:3]};
-
-                    if (guard_bit &&
-                        (round_bit ||
-                         sticky_bit ||
-                         ext_result[3])) begin
-
-                        round_temp = round_temp + 25'd1;
-
-                    end
-
-                    // Handle rounding carry
-                    if (round_temp[24]) begin
-
-                        mant_rounded = round_temp[24:1];
-                        exp_big = exp_big + 1;
-
-                    end
-                    else begin
-
-                        mant_rounded = round_temp[23:0];
-
-                    end
-
-                    // --------------------------------
-                    // Overflow
-                    // --------------------------------
-
-                    if (exp_big >= 255) begin
-
-                        answer = {sign_result, 8'hFF, 23'b0};
-
-                    end
-
-                    // --------------------------------
-                    // Subnormal result
-                    // --------------------------------
-
-                    else if ((exp_big == 1) &&
-                             (!mant_rounded[23])) begin
-
-                        answer = {
-                            sign_result,
-                            8'b0,
-                            mant_rounded[22:0]
-                        };
-
-                    end
-
-                    // --------------------------------
-                    // Normal result
-                    // --------------------------------
-
-                    else begin
-
-                        answer = {
-                            sign_result,
-                            exp_big[7:0],
-                            mant_rounded[22:0]
-                        };
-
-                    end
-
-                end
-            end
-
-            fp_calculate = answer;
-
-        end
-
-    endfunction
-
-
-    // --------------------------------
-    // Sequential output stage
-    // --------------------------------
-
-    always_ff @(posedge clk) begin
-
-        if (reset) begin
-
-            result <= 32'b0;
-            out_valid <= 1'b0;
-
-        end
-        else begin
-
-            out_valid <= in_valid;
-
-            if (in_valid) begin
-
-                result <= fp_calculate(a, b, sub);
-
-            end
-
-        end
-
+  localparam logic [31:0] QNAN = 32'h7FC0_0000;
+  logic        sa, sb;
+  logic [7:0]  ea, eb;
+  logic [22:0] fa, fb;
+  assign sa = a[31];
+  assign sb = b[31] ^ sub;          // a - b == a + (-b), also for 0 / inf / NaN
+  assign ea = a[30:23];
+  assign eb = b[30:23];
+  assign fa = a[22:0];
+  assign fb = b[22:0];
+
+  logic a_nan, b_nan, a_inf, b_inf;
+  assign a_nan = (ea == 8'hFF) && (fa != 23'd0);
+  assign b_nan = (eb == 8'hFF) && (fb != 23'd0);
+  assign a_inf = (ea == 8'hFF) && (fa == 23'd0);
+  assign b_inf = (eb == 8'hFF) && (fb == 23'd0);
+
+  logic a_ge_b;
+  assign a_ge_b = ({ea, fa} >= {eb, fb});
+
+  logic        sl, ss;              // sign of larger / smaller magnitude
+  logic [7:0]  el, es;
+  logic [22:0] fl, fs;
+
+  always_comb begin
+    if (a_ge_b) begin
+      sl = sa; el = ea; fl = fa;
+      ss = sb; es = eb; fs = fb;
+    end else begin
+      sl = sb; el = eb; fl = fb;
+      ss = sa; es = ea; fs = fa;
     end
+  end
+
+  // effective exponents (subnormals use exponent 1) and 24-bit significands
+  logic [8:0]  el_eff, es_eff;
+  logic [23:0] ml, ms;
+  assign el_eff = (el == 8'd0) ? 9'd1 : {1'b0, el};
+  assign es_eff = (es == 8'd0) ? 9'd1 : {1'b0, es};
+  assign ml     = {(el != 8'd0), fl};
+  assign ms     = {(es != 8'd0), fs};
+
+  // --------------------------------------------------- align smaller operand
+  // 27 bits: {24-bit significand, guard, round, sticky}
+  logic [8:0]  diff;
+  logic [26:0] ext_l, ext_s, mask, aligned;
+  logic        eff_sub;
+
+  assign diff    = el_eff - es_eff;
+  assign ext_l   = {ml, 3'b000};
+  assign ext_s   = {ms, 3'b000};
+  assign mask    = (27'd1 << diff) - 27'd1;               // all ones if diff>=27
+  assign aligned = (ext_s >> diff) | {26'd0, |(ext_s & mask)};
+  assign eff_sub = sl ^ ss;
+
+  // ------------------------------------------------------------- add / sub
+  logic [27:0] sum;
+  assign sum = eff_sub ? ({1'b0, ext_l} - {1'b0, aligned})
+                       : ({1'b0, ext_l} + {1'b0, aligned});
+
+  // ------------------------------------------------------------- normalize
+  logic [4:0]  lz;
+  logic [9:0]  e_pre, em1;
+  logic [4:0]  shamt;
+  logic [26:0] norm;
+  logic [9:0]  e_n;
+
+  always_comb begin
+    lz = 5'd27;
+    for (int i = 0; i <= 26; i++) begin
+      if (sum[i]) lz = 5'(26 - i);
+    end
+  end
+
+  always_comb begin
+    e_pre = {1'b0, el_eff};
+    em1   = e_pre - 10'd1;
+    if (sum[27]) begin                         // carry out: shift right by one
+      norm  = {sum[27:2], sum[1] | sum[0]};
+      shamt = 5'd0;
+      e_n   = e_pre + 10'd1;
+    end else begin
+      shamt = (10'(lz) <= em1) ? lz : em1[4:0]; // stop at exponent 1 (subnormal)
+      norm  = 27'(sum[26:0] << shamt);
+      e_n   = e_pre - 10'(shamt);
+      if (!norm[26]) e_n = 10'd0;              // subnormal
+    end
+  end
+
+  // -------------------------------------------------------------- round RNE
+  logic        round_up;
+  logic [24:0] mant_r;
+  logic [9:0]  e_r;
+
+  assign round_up = norm[2] & (norm[1] | norm[0] | norm[3]);
+  assign mant_r   = {1'b0, norm[26:3]} + 25'(round_up);
+
+  always_comb begin
+    e_r = e_n;
+    if (mant_r[24])                      e_r = e_n + 10'd1;  // mantissa overflow
+    else if (e_n == 10'd0 && mant_r[23]) e_r = 10'd1;        // subnormal -> normal
+  end
+
+  // ---------------------------------------------------------------- result
+  logic [31:0] res_c;
+
+  always_comb begin
+    if (a_nan || b_nan) begin
+      res_c = QNAN;
+    end else if (a_inf && b_inf) begin
+      res_c = (sa != sb) ? QNAN : {sa, 8'hFF, 23'd0};
+    end else if (a_inf) begin
+      res_c = {sa, 8'hFF, 23'd0};
+    end else if (b_inf) begin
+      res_c = {sb, 8'hFF, 23'd0};
+    end else if (sum == 28'd0) begin
+      res_c = {(eff_sub ? 1'b0 : sl), 31'd0};   // exact zero
+    end else if (e_r >= 10'd255) begin
+      res_c = {sl, 8'hFF, 23'd0};               // overflow -> infinity
+    end else begin
+      res_c = {sl, e_r[7:0], mant_r[22:0]};
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      out_valid <= 1'b0;
+      result    <= 32'd0;
+    end else begin
+      out_valid <= in_valid;
+      if (in_valid) result <= res_c;
+    end
+  end
 
 endmodule
